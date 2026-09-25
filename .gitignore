@@ -1,0 +1,3 @@
+venv/
+__pycache__/
+forgesense-ui/node_modules/
