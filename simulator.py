@@ -63,6 +63,6 @@ try:
             r.set(f"telemetry:{machine_id}", json.dumps(data), ex=60)
             
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Broadcasted telemetry for {len(MACHINES)} machines")
-        time.sleep(2)
+        time.sleep(4)
 except KeyboardInterrupt:
     print("\nSimulator stopped.")

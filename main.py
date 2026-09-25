@@ -117,6 +117,12 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db:
     return {"access_token": access_token, "token_type": "bearer"}
 
 # --- API ENDPOINTS ---
+
+@app.on_event("shutdown")
+def shutdown_event():
+    """Forces the background thread pool to close when stopping the server."""
+    executor.shutdown(wait=False)
+    
 @app.post("/setup", status_code=201)
 def setup_initial_data(db: Session = Depends(get_db)):
     """Creates a default plant and machine so we have foreign keys to attach telemetry to."""

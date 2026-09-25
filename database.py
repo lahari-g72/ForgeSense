@@ -1,33 +1,29 @@
 import os
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.declarative import declarative_base
 from dotenv import load_dotenv
 
-# Load environment variables from your .env file
+# Load environment variables from the .env file
 load_dotenv()
 
-# Get the database URL (ensure you updated this with your new Neon password!)
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# Make sure it didn't fail to load
 if not DATABASE_URL:
-    raise ValueError("No DATABASE_URL found in .env file")
+    raise ValueError("DATABASE_URL is missing. Check your .env file!")
 
-# Setup the SQLAlchemy engine
-engine = engine = create_engine(
+engine = create_engine(
     DATABASE_URL,
-    pool_size=20,
-    max_overflow=30,
-    pool_timeout=60,
-    pool_recycle=1800
+    pool_pre_ping=True,  
+    pool_recycle=300,    
+    max_overflow=10      
 )
 
-# Create a session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Base class for your models
 Base = declarative_base()
 
-# FastAPI Dependency to yield database sessions
 def get_db():
     db = SessionLocal()
     try:
