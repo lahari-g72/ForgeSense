@@ -19,10 +19,18 @@ models.Base.metadata.create_all(bind=engine)
 app = FastAPI(title="ForgeSense Enterprise API")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-# Allow React frontend to communicate with FastAPI
+# --- CORS SECURITY CONFIGURATION ---
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://forge-sense.vercel.app",
+    "https://forge-sense-git-main-lll-53f0.vercel.app",
+    "https://forge-sense-niong74ss-lll-53f0.vercel.app",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
