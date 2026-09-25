@@ -12,12 +12,4 @@ ForgeSense is a high-throughput, full-stack data pipeline designed to ingest, an
 
 ##  System Architecture
 
-```mermaid
-graph TD
-    A[IoT Simulator (Python)] -->|REST POST /telemetry| B(FastAPI Backend)
-    B -->|Persist History| C[(Cloud PostgreSQL)]
-    B -->|In-Memory Analytics| D{Anomaly Engine}
-    D -->|Push Telemetry Stream| E[WebSockets]
-    D -->|Push Priority Alerts| E
-    E -->|Bi-Directional Async| F[React + TS Dashboard]
-    F -->|REST POST /acknowledge| B
+![ForgeSense System Architecture](architecture_diagram.png)
