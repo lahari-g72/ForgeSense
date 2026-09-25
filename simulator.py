@@ -1,27 +1,68 @@
+import os
 import time
 import random
 import requests
+import json
+from datetime import datetime
+import redis
+from dotenv import load_dotenv
+
+# Load environment variables from .env
+load_dotenv()
+
+# Securely connect to Upstash Redis, bypassing strict SSL checks for local dev
+redis_url = os.getenv("REDIS_URL")
+if redis_url:
+    r = redis.from_url(
+        redis_url, 
+        decode_responses=True,
+        ssl_cert_reqs="none"
+    )
+else:
+    r = redis.Redis(
+        host=os.getenv("REDIS_HOST"),
+        port=os.getenv("REDIS_PORT"),
+        password=os.getenv("REDIS_PASSWORD"),
+        ssl=True,
+        ssl_cert_reqs="none",
+        decode_responses=True
+    )
 
 API_URL = "http://127.0.0.1:8000/telemetry/"
-MACHINES = ["Machine-A (Lathe)", "Machine-B (CNC)", "Machine-C (Welder)"]
+MACHINES = ["CNC-001", "CNC-002", "MILL-001"]
 
-print("Starting ForgeSense Simulator (with Anomaly Injection)...")
+def generate_telemetry(machine_id: str):
+    base_temp = 75.0 if "CNC" in machine_id else 65.0
+    base_vib = 5.0 if "CNC" in machine_id else 3.5
+    
+    temperature = base_temp + random.uniform(-5.0, 15.0)
+    vibration = base_vib + random.uniform(-2.0, 5.0)
+    
+    return {
+        "machine_id": machine_id,
+        "temperature": round(temperature, 2),
+        "vibration": round(vibration, 2),
+        "pressure": round(120.0 + random.uniform(-10.0, 10.0), 2),
+        "rpm": round(2500 + random.uniform(-200, 200), 2),
+        "power_consumption": round(15.0 + random.uniform(-2.0, 2.0), 2)
+    }
 
-while True:
-    for machine in MACHINES:
-        # Normal operating temperature
-        temp = round(random.uniform(60.0, 80.0), 1)
-        
-        # 10% chance to simulate a massive mechanical failure (temperature spike!)
-        if random.random() < 0.10:
-            temp += random.uniform(15.0, 25.0)
+print("Starting multi-machine ForgeSense Simulator...")
+print("Press CTRL+C to stop.")
+
+try:
+    while True:
+        for machine_id in MACHINES:
+            data = generate_telemetry(machine_id)
             
-        status = "Critical" if temp > 90.0 else "Warning" if temp > 80.0 else "Healthy"
+            try:
+                requests.post(API_URL, json=data)
+            except Exception as e:
+                print(f"API Error for {machine_id}: {e}")
+                
+            r.set(f"telemetry:{machine_id}", json.dumps(data), ex=60)
             
-        try:
-            requests.post(API_URL, json={"machine_id": machine, "temperature": temp, "status": status})
-            print(f"Sent {machine}: {temp}°C")
-        except:
-            pass
-            
-    time.sleep(3)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Broadcasted telemetry for {len(MACHINES)} machines")
+        time.sleep(2)
+except KeyboardInterrupt:
+    print("\nSimulator stopped.")

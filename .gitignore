@@ -1,4 +1,13 @@
+# Environments
+.env
 venv/
+env/
+
+# Python
 __pycache__/
-forgesense-ui/node_modules/
-.env 
+*.pyc
+
+# Node
+node_modules/
+dist/
+.DS_Store
