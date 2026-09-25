@@ -1,18 +1,17 @@
 import os
 import json
 import redis
-from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from typing import List
-from typing import Optional
+from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor
 import models
 import schemas
 from database import engine, get_db, SessionLocal
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi import status
 import auth
-
 
 # Auto-generate database tables based on models.py
 models.Base.metadata.create_all(bind=engine)
@@ -37,6 +36,9 @@ if not REDIS_URL:
 # decode_responses=True ensures we get clean strings back instead of raw bytes
 redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True, ssl_cert_reqs="none")
 
+# --- THREAD POOL FOR BACKGROUND TASKS ---
+executor = ThreadPoolExecutor(max_workers=10)
+
 # --- WEBSOCKET CONNECTION MANAGER ---
 class ConnectionManager:
     def __init__(self):
@@ -51,12 +53,14 @@ class ConnectionManager:
 
     async def broadcast(self, message: dict):
         for connection in self.active_connections:
-            await connection.send_json(message)
+            try:
+                await connection.send_json(message)
+            except Exception:
+                pass
 
 manager = ConnectionManager()
 
 # --- AUTHENTICATION & SECURITY ---
-
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -121,37 +125,48 @@ def setup_initial_data(db: Session = Depends(get_db)):
         return {"message": "Database seeded with default Plant and Machine (CNC-001)"}
     return {"message": "Database already seeded"}
 
-async def process_anomalies(telemetry: schemas.TelemetryCreate):
+def process_telemetry_background(telemetry_data: dict):
+    """Executes in a separate worker thread — completely independent of FastAPI's event loop."""
     db = SessionLocal()
     try:
+        # 1. Validate machine
+        machine = db.query(models.Machine).filter(models.Machine.id == telemetry_data["machine_id"]).first()
+        if not machine:
+            print(f"Ignored payload: Machine {telemetry_data['machine_id']} not found.")
+            return
+
+        # 2. Update Redis Cache
+        redis_client.setex(
+            f"telemetry_cache:{telemetry_data['machine_id']}", 
+            60, 
+            json.dumps(telemetry_data)
+        )
+
+        # 3. Save standard telemetry
+        db_telemetry = models.Telemetry(**telemetry_data)
+        db.add(db_telemetry)
+
+        # 4. Check for anomalies
         is_anomalous = False
         alert_msg = ""
-
-        if telemetry.temperature > 85.0:
+        if telemetry_data["temperature"] > 85.0:
             is_anomalous = True
-            alert_msg = f"Critical Temperature: {telemetry.temperature}°C"
-        elif telemetry.vibration > 8.0:
+            alert_msg = f"Critical Temperature: {telemetry_data['temperature']}°C"
+        elif telemetry_data["vibration"] > 8.0:
             is_anomalous = True
-            alert_msg = f"Critical Vibration: {telemetry.vibration} mm/s"
+            alert_msg = f"Critical Vibration: {telemetry_data['vibration']} mm/s"
 
+        # 5. Create alert
         if is_anomalous:
-            db_alert = models.Alert(machine_id=telemetry.machine_id, message=alert_msg)
+            db_alert = models.Alert(machine_id=telemetry_data["machine_id"], message=alert_msg)
             db.add(db_alert)
+            machine.status = "Critical"
 
-            machine = db.query(models.Machine).filter(models.Machine.id == telemetry.machine_id).first()
-            if machine:
-                machine.status = "Critical"
-
-            db.commit()
-
-            # Simulated external notification (e.g., triggering a Slack webhook)
-            await manager.broadcast({
-                "type": "ALERT", 
-                "data": {"machine_id": telemetry.machine_id, "message": alert_msg}
-            })
+        db.commit()
+    except Exception as e:
+        print(f"Background worker error: {e}")
     finally:
         db.close()
-
 
 @app.get("/telemetry/", response_model=List[schemas.TelemetryResponse])
 def get_telemetry_history(
@@ -165,52 +180,31 @@ def get_telemetry_history(
     """Retrieve historical telemetry with pagination, filtering, and sorting."""
     query = db.query(models.Telemetry)
     
-    # 1. Filtering
     if machine_id:
         query = query.filter(models.Telemetry.machine_id == machine_id)
         
-    # 2. Sorting
     if sort_by == "desc":
         query = query.order_by(models.Telemetry.timestamp.desc())
     else:
         query = query.order_by(models.Telemetry.timestamp.asc())
         
-    # 3. Pagination
     return query.offset(skip).limit(limit).all()
 
-@app.post("/telemetry/", response_model=schemas.TelemetryResponse)
-async def create_telemetry(
-    telemetry: schemas.TelemetryCreate, 
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)
-):
-    machine = db.query(models.Machine).filter(models.Machine.id == telemetry.machine_id).first()
-    if not machine:
-        raise HTTPException(status_code=404, detail="Machine not found")
+@app.post("/telemetry/", status_code=status.HTTP_202_ACCEPTED)
+async def create_telemetry(telemetry: schemas.TelemetryCreate):
+    """Instantly accepts telemetry, emits WebSockets, and offloads DB I/O to a dedicated thread."""
+    payload = telemetry.model_dump()
 
-    # 1. Save standard telemetry instantly
-    db_telemetry = models.Telemetry(**telemetry.model_dump())
-    db.add(db_telemetry)
-    db.commit()
-    db.refresh(db_telemetry)
-
-    # 2. Update Redis RAM cache
-    redis_client.setex(
-        f"telemetry_cache:{telemetry.machine_id}", 
-        60, 
-        json.dumps(telemetry.model_dump())
-    )
-
-    # 3. Broadcast standard metrics to UI
+    # 1. Fast WebSocket broadcast (Local memory, 0ms network latency)
     await manager.broadcast({
         "type": "TELEMETRY", 
-        "data": telemetry.model_dump()
+        "data": payload
     })
 
-    # 4. Offload heavy anomaly evaluation to the background worker
-    background_tasks.add_task(process_anomalies, telemetry)
+    # 2. Fire-and-forget to separate thread (Never blocks event loop or response)
+    executor.submit(process_telemetry_background, payload)
 
-    return db_telemetry
+    return {"message": "Telemetry received and queued"}
 
 @app.get("/telemetry/{machine_id}/latest")
 def get_cached_telemetry(machine_id: str):
@@ -225,8 +219,8 @@ def get_active_alerts(
     db: Session = Depends(get_db), 
     current_user: models.User = Depends(get_current_user)
 ):
-    # This route is now protected! Only users with a valid token can see this.
     return db.query(models.Alert).filter(models.Alert.is_acknowledged == False).all()
+
 @app.patch("/alerts/{alert_id}/acknowledge", response_model=schemas.AlertResponse)
 def acknowledge_alert(
     alert_id: int, 
@@ -245,6 +239,7 @@ def acknowledge_alert(
     db.commit()
     db.refresh(alert)
     return alert
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
